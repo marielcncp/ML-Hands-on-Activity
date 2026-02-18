@@ -1,6 +1,5 @@
 # preprocess.py
-# Complete preprocessing pipeline for RNN sentiment analysis
-
+# Complete preprocessing pipeline for RNN sentiment analysis with length category
 
 import pandas as pd
 import re
@@ -12,11 +11,9 @@ from tensorflow.keras.preprocessing.sequence import pad_sequences
 from sklearn.preprocessing import LabelEncoder
 from sklearn.model_selection import train_test_split
 
-
 # --------------------------------------------------
 # Contractions Dictionary
 # --------------------------------------------------
-
 CONTRACTIONS = {
     "don't": "do not",
     "can't": "can not",
@@ -30,102 +27,75 @@ CONTRACTIONS = {
     "'m": " am"
 }
 
-
 # --------------------------------------------------
 # Negation Words
 # --------------------------------------------------
-
 NEGATION_WORDS = {
     "not", "no", "never", "none", "cannot"
 }
 
-
 # --------------------------------------------------
 # Expand Contractions
 # --------------------------------------------------
-
 def expand_contractions(text):
-
     for key, val in CONTRACTIONS.items():
         text = re.sub(key, val, text)
-
     return text
-
 
 # --------------------------------------------------
 # Clean Text
 # --------------------------------------------------
-
 def clean_text(text):
-
     text = str(text).lower()
-
     text = expand_contractions(text)
-
-    # Remove symbols and numbers
-    text = re.sub(r"[^a-z\s]", "", text)
-
-    # Remove extra spaces
+    text = re.sub(r"[^a-z\s]", "", text)  # remove symbols/numbers
     text = re.sub(r"\s+", " ", text).strip()
-
     return text
 
+# --------------------------------------------------
+# Length Category: short / long
+# --------------------------------------------------
+def length_category(text, threshold=5):
+    """
+    Classify text as 'short' or 'long' based on word count.
+    Short: <= threshold words
+    Long: > threshold words
+    """
+    word_count = len(text.split())
+    return "short" if word_count <= threshold else "long"
 
 # --------------------------------------------------
 # Handle Negation
 # --------------------------------------------------
-
 def handle_negation(text, window=3):
-
     words = text.split()
-
     result = []
-
     negate = 0
-
     for word in words:
-
         if word in NEGATION_WORDS:
             negate = window
             result.append(word)
             continue
-
         if negate > 0:
             result.append("NEG_" + word)
             negate -= 1
-
         else:
             result.append(word)
-
     return " ".join(result)
-
 
 # --------------------------------------------------
 # Preprocess Single Sentence (For Testing)
 # --------------------------------------------------
-
 def preprocess_text(text, tokenizer, max_len=30):
-
     text = clean_text(text)
-
     text = handle_negation(text)
-
     seq = tokenizer.texts_to_sequences([text])
-
-    padded = pad_sequences(
-        seq,
-        maxlen=max_len,
-        padding="post",
-        truncating="post"
-    )
-
+    padded = pad_sequences(seq, maxlen=max_len, padding="post", truncating="post")
     return padded
-
 
 # --------------------------------------------------
 # Main Preprocessing Pipeline
 # --------------------------------------------------
-
 def preprocess_dataset(
     csv_path,
     vocab_size=10000,
@@ -138,91 +108,73 @@ def preprocess_dataset(
 
     Returns:
     X_train, X_test, y_train, y_test,
-    tokenizer, label_encoder
+    tokenizer, label_encoder, dataframe (with clean text & length category)
     """
 
     # ----------------------------------------------
-    # Load Data (with encoding fix)
+    # Load Data
     # ----------------------------------------------
-
-    df = pd.read_csv(
-    csv_path,
-    sep=",",
-    engine="python",
-    encoding="latin1"
-    )
-
+    df = pd.read_csv(csv_path, sep=",", engine="python", encoding="latin1")
 
     # ----------------------------------------------
     # Check Required Columns
     # ----------------------------------------------
-
     if "phrase" not in df.columns or "sentiment" not in df.columns:
-        raise ValueError(
-            "CSV must contain 'phrase' and 'sentiment' columns"
-        )
+        raise ValueError("CSV must contain 'phrase' and 'sentiment' columns")
+
+    # ----------------------------------------------
+    # Clean Labels
+    # ----------------------------------------------
+    df["sentiment"] = (
+        df["sentiment"].astype(str).str.strip().str.replace("'", "", regex=False)
+    )
+    df["sentiment"] = df["sentiment"].replace({"positive'": "positive"})
+
+    print("Unique labels after cleaning:", df["sentiment"].unique())
 
     # ----------------------------------------------
     # Clean Text
     # ----------------------------------------------
-
     df["clean_text"] = df["phrase"].apply(clean_text)
+
+    # ----------------------------------------------
+    # Add Length Category
+    # ----------------------------------------------
+    df["length_category"] = df["clean_text"].apply(length_category)
 
     # ----------------------------------------------
     # Handle Negation
     # ----------------------------------------------
-
     df["processed_text"] = df["clean_text"].apply(handle_negation)
 
     # ----------------------------------------------
     # Tokenization
     # ----------------------------------------------
-
-    tokenizer = Tokenizer(
-        num_words=vocab_size,
-        oov_token="<OOV>"
-    )
-
+    tokenizer = Tokenizer(num_words=vocab_size, oov_token="<OOV>")
     tokenizer.fit_on_texts(df["processed_text"])
-
-    sequences = tokenizer.texts_to_sequences(
-        df["processed_text"]
-    )
+    sequences = tokenizer.texts_to_sequences(df["processed_text"])
 
     # ----------------------------------------------
     # Padding
     # ----------------------------------------------
-
-    padded = pad_sequences(
-        sequences,
-        maxlen=max_len,
-        padding="post",
-        truncating="post"
-    )
+    padded = pad_sequences(sequences, maxlen=max_len, padding="post", truncating="post")
 
     # ----------------------------------------------
     # Encode Labels
     # ----------------------------------------------
-
     encoder = LabelEncoder()
-
-    labels = encoder.fit_transform(
-        df["sentiment"]
-    )
+    labels = encoder.fit_transform(df["sentiment"])
 
     # ----------------------------------------------
-    # Check if stratification is possible
+    # Check Stratification
     # ----------------------------------------------
     unique, counts = np.unique(labels, return_counts=True)
     min_count = counts.min()
-    
-    if min_count < 2:
+    stratify_labels = labels if min_count >= 2 else None
+
+    if stratify_labels is None:
         print("⚠️ Warning: Some classes have <2 samples. Stratify disabled.")
-        stratify_labels = None
-    else:
-        stratify_labels = labels
-    
-    
+
     # ----------------------------------------------
     # Train / Test Split
     # ----------------------------------------------
@@ -234,40 +186,19 @@ def preprocess_dataset(
         stratify=stratify_labels
     )
 
-
-    # ----------------------------------------------
-    # Return Everything
-    # ----------------------------------------------
-
-    return (
-        X_train,
-        X_test,
-        y_train,
-        y_test,
-        tokenizer,
-        encoder
-    )
-
+    return X_train, X_test, y_train, y_test, tokenizer, encoder, df
 
 # --------------------------------------------------
-# Run Test (Optional: For Debugging)
+# Run Test (Optional)
 # --------------------------------------------------
-
 if __name__ == "__main__":
-
     print("Running preprocessing test...")
-
-    X_train, X_test, y_train, y_test, tokenizer, encoder = preprocess_dataset(
-        "ds.csv"
-    )
-
+    X_train, X_test, y_train, y_test, tokenizer, encoder, df = preprocess_dataset("ds.csv")
     print("Train shape:", X_train.shape)
     print("Test shape:", X_test.shape)
     print("Classes:", encoder.classes_)
 
     sample = "I do not like this movie at all"
-
     x = preprocess_text(sample, tokenizer)
-
     print("Sample input:", sample)
     print("Processed:", x)
